@@ -689,16 +689,15 @@ namespace cryptonote
 
     // user options, must be called before calling init()
 
-    //FIXME: parameter names don't match function definition in .cpp file
     /**
      * @brief sets various performance options
      *
-     * @param block_threads max number of threads when preparing blocks for addition
+     * @param maxthreads max number of threads when preparing blocks for addition
      * @param blocks_per_sync number of blocks to cache before syncing to database
      * @param sync_mode the ::blockchain_db_sync_mode to use
      * @param fast_sync sync using built-in block hashes as trusted
      */
-    void set_user_options(uint64_t block_threads, uint64_t blocks_per_sync,
+    void set_user_options(uint64_t maxthreads, uint64_t blocks_per_sync,
         blockchain_db_sync_mode sync_mode, bool fast_sync);
 
     /**
@@ -790,13 +789,15 @@ namespace cryptonote
     bool for_all_key_images(std::function<bool(const crypto::key_image&)>) const;
 
     /**
-     * @brief perform a check on all blocks in the blockchain
+     * @brief perform a check on all blocks in the blockchain in the given range
      *
+     * @param h1 the start height
+     * @param h2 the end height
      * @param std::function the check to perform, pass/fail
      *
      * @return false if any block fails the check, otherwise true
      */
-    bool for_all_blocks(std::function<bool(uint64_t, const crypto::hash&, const block&)>) const;
+    bool for_blocks_range(const uint64_t& h1, const uint64_t& h2, std::function<bool(uint64_t, const crypto::hash&, const block&)>) const;
 
     /**
      * @brief perform a check on all transactions in the blockchain
@@ -854,6 +855,18 @@ namespace cryptonote
      * @return a list of chains
      */
     std::list<std::pair<block_extended_info,uint64_t>> get_alternative_chains() const;
+
+    void add_txpool_tx(transaction &tx, const txpool_tx_meta_t &meta);
+    void update_txpool_tx(const crypto::hash &txid, const txpool_tx_meta_t &meta);
+    void remove_txpool_tx(const crypto::hash &txid);
+    uint64_t get_txpool_tx_count() const;
+    txpool_tx_meta_t get_txpool_tx_meta(const crypto::hash& txid) const;
+    bool get_txpool_tx_blob(const crypto::hash& txid, cryptonote::blobdata &bd) const;
+    cryptonote::blobdata get_txpool_tx_blob(const crypto::hash& txid) const;
+    bool for_all_txpool_txes(std::function<bool(const crypto::hash&, const txpool_tx_meta_t&, const cryptonote::blobdata*)>, bool include_blob = false) const;
+
+    void lock();
+    void unlock();
 
     void cancel();
 
@@ -1239,7 +1252,7 @@ namespace cryptonote
      * @return true
      */
     bool update_next_cumulative_size_limit();
-    void return_tx_to_pool(const std::vector<transaction> &txs);
+    void return_tx_to_pool(std::vector<transaction> &txs);
 
     /**
      * @brief make sure a transaction isn't attempting a double-spend

@@ -272,9 +272,6 @@ namespace cryptonote
       m_config_folder_mempool = m_config_folder_mempool + "/" + m_port;
     }
 
-    r = m_mempool.init(m_fakechain ? std::string() : m_config_folder_mempool);
-    CHECK_AND_ASSERT_MES(r, false, "Failed to initialize memory pool");
-
     std::string db_type = command_line::get_arg(vm, command_line::arg_db_type);
     std::string db_sync_mode = command_line::get_arg(vm, command_line::arg_db_sync_mode);
     bool fast_sync = command_line::get_arg(vm, command_line::arg_fast_block_sync) != 0;
@@ -400,6 +397,9 @@ namespace cryptonote
         blocks_per_sync, sync_mode, fast_sync);
 
     r = m_blockchain_storage.init(db, m_testnet, test_options);
+
+    r = m_mempool.init();
+    CHECK_AND_ASSERT_MES(r, false, "Failed to initialize memory pool");
 
     // now that we have a valid m_blockchain_storage, we can clean out any
     // transactions in the pool that do not conform to the current fork
@@ -713,12 +713,13 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   std::pair<uint64_t, uint64_t> core::get_coinbase_tx_sum(const uint64_t start_offset, const size_t count)
   {
-    std::list<block> blocks;
     uint64_t emission_amount = 0;
     uint64_t total_fee_amount = 0;
-    this->get_blocks(start_offset, count, blocks);
-    for(auto& b: blocks)
+    if (count)
     {
+      const uint64_t end = start_offset + count - 1;
+      m_blockchain_storage.for_blocks_range(start_offset, end,
+        [this, &emission_amount, &total_fee_amount](uint64_t, const crypto::hash& hash, const block& b){
       std::list<transaction> txs;
       std::list<crypto::hash> missed_txs;
       uint64_t coinbase_amount = get_outs_money_amount(b.miner_tx);
@@ -731,6 +732,8 @@ namespace cryptonote
       
       emission_amount += coinbase_amount - tx_fee_amount;
       total_fee_amount += tx_fee_amount;
+      return true;
+      });
     }
 
     return std::pair<uint64_t, uint64_t>(emission_amount, total_fee_amount);
@@ -760,7 +763,7 @@ namespace cryptonote
     return true;
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::add_new_tx(const transaction& tx, tx_verification_context& tvc, bool keeped_by_block, bool relayed, bool do_not_relay)
+  bool core::add_new_tx(transaction& tx, tx_verification_context& tvc, bool keeped_by_block, bool relayed, bool do_not_relay)
   {
     crypto::hash tx_hash = get_transaction_hash(tx);
     crypto::hash tx_prefix_hash = get_transaction_prefix_hash(tx);
@@ -774,7 +777,7 @@ namespace cryptonote
     return m_blockchain_storage.get_total_transactions();
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::add_new_tx(const transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block, bool relayed, bool do_not_relay)
+  bool core::add_new_tx(transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block, bool relayed, bool do_not_relay)
   {
     if(m_mempool.have_tx(tx_hash))
     {
@@ -795,17 +798,15 @@ namespace cryptonote
   bool core::relay_txpool_transactions()
   {
     // we attempt to relay txes that should be relayed, but were not
-    std::list<std::pair<crypto::hash, cryptonote::transaction>> txs;
+    std::list<std::pair<crypto::hash, cryptonote::blobdata>> txs;
     if (m_mempool.get_relayable_transactions(txs) && !txs.empty())
     {
       cryptonote_connection_context fake_context = AUTO_VAL_INIT(fake_context);
       tx_verification_context tvc = AUTO_VAL_INIT(tvc);
       NOTIFY_NEW_TRANSACTIONS::request r;
-      blobdata bl;
       for (auto it = txs.begin(); it != txs.end(); ++it)
       {
-        t_serializable_object_to_blob(it->second, bl);
-        r.txs.push_back(bl);
+        r.txs.push_back(it->second);
       }
       get_protocol()->relay_transactions(r, fake_context);
       m_mempool.set_relayed(txs);
@@ -815,7 +816,7 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   void core::on_transaction_relayed(const cryptonote::blobdata& tx_blob)
   {
-    std::list<std::pair<crypto::hash, cryptonote::transaction>> txs;
+    std::list<std::pair<crypto::hash, cryptonote::blobdata>> txs;
     cryptonote::transaction tx;
     crypto::hash tx_hash, tx_prefix_hash;
     if (!parse_and_validate_tx_from_blob(tx_blob, tx, tx_hash, tx_prefix_hash))
@@ -823,7 +824,7 @@ namespace cryptonote
       LOG_ERROR("Failed to parse relayed transaction");
       return;
     }
-    txs.push_back(std::make_pair(tx_hash, std::move(tx)));
+    txs.push_back(std::make_pair(tx_hash, std::move(tx_blob)));
     m_mempool.set_relayed(txs);
   }
   //-----------------------------------------------------------------------------------------------
@@ -893,9 +894,9 @@ namespace cryptonote
     bce.block = cryptonote::block_to_blob(b);
     for (const auto &tx_hash: b.tx_hashes)
     {
-      cryptonote::transaction tx;
-      CHECK_AND_ASSERT_THROW_MES(pool.get_transaction(tx_hash, tx), "Transaction not found in pool");
-      bce.txs.push_back(cryptonote::tx_to_blob(tx));
+      cryptonote::blobdata txblob;
+      CHECK_AND_ASSERT_THROW_MES(pool.get_transaction(tx_hash, txblob), "Transaction not found in pool");
+      bce.txs.push_back(txblob);
     }
     return bce;
   }
@@ -955,6 +956,7 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   bool core::prepare_handle_incoming_blocks(const std::list<block_complete_entry> &blocks)
   {
+    m_incoming_tx_lock.lock();
     m_blockchain_storage.prepare_handle_incoming_blocks(blocks);
     return true;
   }
@@ -962,7 +964,11 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   bool core::cleanup_handle_incoming_blocks(bool force_sync)
   {
-    m_blockchain_storage.cleanup_handle_incoming_blocks(force_sync);
+    try {
+      m_blockchain_storage.cleanup_handle_incoming_blocks(force_sync);
+    }
+    catch (...) {}
+    m_incoming_tx_lock.unlock();
     return true;
   }
 
@@ -1043,10 +1049,21 @@ namespace cryptonote
     return true;
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_pool_transaction(const crypto::hash &id, transaction& tx) const
+  bool core::get_pool_transaction_stats(struct txpool_stats& stats) const
+  {
+    m_mempool.get_transaction_stats(stats);
+    return true;
+  }
+  //-----------------------------------------------------------------------------------------------
+  bool core::get_pool_transaction(const crypto::hash &id, cryptonote::blobdata& tx) const
   {
     return m_mempool.get_transaction(id, tx);
   }  
+  //-----------------------------------------------------------------------------------------------
+  bool core::pool_has_tx(const crypto::hash &id) const
+  {
+    return m_mempool.have_tx(id);
+  }
   //-----------------------------------------------------------------------------------------------
   bool core::get_pool_transactions_and_spent_keys_info(std::vector<tx_info>& tx_infos, std::vector<spent_key_image_info>& key_image_infos) const
   {
@@ -1089,7 +1106,7 @@ namespace cryptonote
     if(!m_starter_message_showed)
     {
       MGINFO_YELLOW(ENDL << "**********************************************************************" << ENDL
-        << "The daemon will start synchronizing with the network. It may take up to several hours." << ENDL
+        << "The daemon will start synchronizing with the network. This may take a long time to complete." << ENDL
         << ENDL
         << "You can set the level of process detailization* through \"set_log <level|categories>\" command*," << ENDL
         << "where <level> is between 0 (no details) and 4 (very verbose), or custom category based levels (eg, *:WARNING)" << ENDL

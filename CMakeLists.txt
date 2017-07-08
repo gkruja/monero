@@ -86,6 +86,10 @@ if (ARM_ID STREQUAL "aarch64" OR ARM_ID STREQUAL "arm64" OR ARM_ID STREQUAL "arm
   set(ARCH "armv8-a")
 endif()
 
+if(ARCH_ID STREQUAL "ppc64le")
+  set(PPC64LE 1)
+endif()
+
 if(WIN32 OR ARM)
   set(OPT_FLAGS_RELEASE "-O2")
 else()
@@ -338,6 +342,8 @@ if (UNIX AND NOT APPLE)
   find_package(Threads)
 endif()
 
+add_definitions(-DAUTO_INITIALIZE_EASYLOGGINGPP)
+
 add_subdirectory(external)
 
 # Final setup for miniupnpc
@@ -384,6 +390,8 @@ else()
   message(STATUS "Building on ${CMAKE_SYSTEM_PROCESSOR} for ${ARCH}")
   if(ARCH STREQUAL "default")
     set(ARCH_FLAG "")
+  elseif(PPC64LE)
+    set(ARCH_FLAG "-mcpu=${ARCH}")
   else()
     set(ARCH_FLAG "-march=${ARCH}")
   endif()
@@ -440,10 +448,12 @@ else()
 
   option(NO_AES "Explicitly disable AES support" ${NO_AES})
 
-  if(NOT NO_AES AND NOT ARM)
+  if(NOT NO_AES AND NOT ARM AND NOT PPC64LE)
     message(STATUS "AES support enabled")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -maes")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -maes")
+  elseif(PPC64LE)
+    message(STATUS "AES support not available on ppc64le")
   elseif(ARM6)
     message(STATUS "AES support not available on ARMv6")
   elseif(ARM7)
@@ -652,6 +662,19 @@ elseif(NOT MSVC)
 endif()
 
 list(APPEND EXTRA_LIBRARIES ${CMAKE_DL_LIBS})
+
+option(USE_READLINE "Build with GNU readline support." ON)
+if(USE_READLINE)
+  find_package(Readline)
+  if(READLINE_FOUND AND GNU_READLINE_FOUND)
+    add_definitions(-DHAVE_READLINE)
+    include_directories(${Readline_INCLUDE_DIR})
+    list(APPEND EXTRA_LIBRARIES ${Readline_LIBRARY})
+    message(STATUS "Found readline library at: ${Readline_ROOT_DIR}")
+  else()
+    message(STATUS "Could not find GNU readline library so building without readline support")
+  endif()
+endif()
 
 if(ANDROID)
   set(ATOMIC libatomic.a)

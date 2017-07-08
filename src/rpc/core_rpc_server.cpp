@@ -736,12 +736,20 @@ namespace cryptonote
 
     for (auto & entry : white_list)
     {
-      res.white_list.emplace_back(entry.id, entry.adr.ip, entry.adr.port, entry.last_seen);
+      if (entry.adr.get_type_id() == epee::net_utils::ipv4_network_address::ID)
+        res.white_list.emplace_back(entry.id, entry.adr.as<epee::net_utils::ipv4_network_address>().ip(),
+            entry.adr.as<epee::net_utils::ipv4_network_address>().port(), entry.last_seen);
+      else
+        res.white_list.emplace_back(entry.id, entry.adr.str(), entry.last_seen);
     }
 
     for (auto & entry : gray_list)
     {
-      res.gray_list.emplace_back(entry.id, entry.adr.ip, entry.adr.port, entry.last_seen);
+      if (entry.adr.get_type_id() == epee::net_utils::ipv4_network_address::ID)
+        res.gray_list.emplace_back(entry.id, entry.adr.as<epee::net_utils::ipv4_network_address>().ip(),
+            entry.adr.as<epee::net_utils::ipv4_network_address>().port(), entry.last_seen);
+      else
+        res.gray_list.emplace_back(entry.id, entry.adr.str(), entry.last_seen);
     }
 
     res.status = CORE_RPC_STATUS_OK;
@@ -793,6 +801,14 @@ namespace cryptonote
   {
     CHECK_CORE_BUSY();
     m_core.get_pool_transaction_hashes(res.tx_hashes);
+    res.status = CORE_RPC_STATUS_OK;
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool core_rpc_server::on_get_transaction_pool_stats(const COMMAND_RPC_GET_TRANSACTION_POOL_STATS::request& req, COMMAND_RPC_GET_TRANSACTION_POOL_STATS::response& res)
+  {
+    CHECK_CORE_BUSY();
+    m_core.get_pool_transaction_stats(res.pool_stats);
     res.status = CORE_RPC_STATUS_OK;
     return true;
   }
@@ -1114,8 +1130,8 @@ namespace cryptonote
         return false;
       }
       res.headers.push_back(block_header_response());
-      bool responce_filled = fill_block_header_response(blk, false, block_height, block_hash, res.headers.back());
-      if (!responce_filled)
+      bool response_filled = fill_block_header_response(blk, false, block_height, block_hash, res.headers.back());
+      if (!response_filled)
       {
         error_resp.code = CORE_RPC_ERROR_CODE_INTERNAL_ERROR;
         error_resp.message = "Internal error: can't produce valid response.";
@@ -1300,12 +1316,16 @@ namespace cryptonote
     }
 
     auto now = time(nullptr);
-    std::map<uint32_t, time_t> blocked_ips = m_p2p.get_blocked_ips();
-    for (std::map<uint32_t, time_t>::const_iterator i = blocked_ips.begin(); i != blocked_ips.end(); ++i)
+    std::map<std::string, time_t> blocked_hosts = m_p2p.get_blocked_hosts();
+    for (std::map<std::string, time_t>::const_iterator i = blocked_hosts.begin(); i != blocked_hosts.end(); ++i)
     {
       if (i->second > now) {
         COMMAND_RPC_GETBANS::ban b;
-        b.ip = i->first;
+        b.host = i->first;
+        b.ip = 0;
+        uint32_t ip;
+        if (epee::string_tools::get_ip_int32_from_string(ip, i->first))
+          b.ip = ip;
         b.seconds = i->second - now;
         res.bans.push_back(b);
       }
@@ -1326,10 +1346,24 @@ namespace cryptonote
 
     for (auto i = req.bans.begin(); i != req.bans.end(); ++i)
     {
-      if (i->ban)
-        m_p2p.block_ip(i->ip, i->seconds);
+      epee::net_utils::network_address na;
+      if (!i->host.empty())
+      {
+        if (!epee::net_utils::create_network_address(na, i->host))
+        {
+          error_resp.code = CORE_RPC_ERROR_CODE_WRONG_PARAM;
+          error_resp.message = "Unsupported host type";
+          return false;
+        }
+      }
       else
-        m_p2p.unblock_ip(i->ip);
+      {
+        na.reset(new epee::net_utils::ipv4_network_address(i->ip, 0));
+      }
+      if (i->ban)
+        m_p2p.block_host(na, i->seconds);
+      else
+        m_p2p.unblock_host(na);
     }
 
     res.status = CORE_RPC_STATUS_OK;
@@ -1608,13 +1642,13 @@ namespace cryptonote
       }
       crypto::hash txid = *reinterpret_cast<const crypto::hash*>(txid_data.data());
 
-      cryptonote::transaction tx;
-      bool r = m_core.get_pool_transaction(txid, tx);
+      cryptonote::blobdata txblob;
+      bool r = m_core.get_pool_transaction(txid, txblob);
       if (r)
       {
         cryptonote_connection_context fake_context = AUTO_VAL_INIT(fake_context);
         NOTIFY_NEW_TRANSACTIONS::request r;
-        r.txs.push_back(cryptonote::tx_to_blob(tx));
+        r.txs.push_back(txblob);
         m_core.get_protocol()->relay_transactions(r, fake_context);
         //TODO: make sure that tx has reached other nodes here, probably wait to receive reflections from other nodes
       }
